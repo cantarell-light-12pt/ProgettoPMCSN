@@ -27,6 +27,16 @@ METRICS = [
 ]
 METRIC_KEYS = [m[0] for m in METRICS]
 
+# Tipi di grafico del transitorio per le immagini composite (chiave, titolo, xlabel, ylabel).
+TRANSIENT_GRID = [
+    ("utilization", "Transitorio - Utilizzazione (media cumulata)",
+     "Tempo simulato [s]", "Utilizzazione"),
+    ("service_passed", "Transitorio - Tempo di servizio passed (media cumulata)",
+     "Indice job passed", "Tempo di servizio [s]"),
+    ("response", "Transitorio - Tempo di risposta (media cumulata)",
+     "Indice job (uscita)", "Tempo di risposta [s]"),
+]
+
 
 def run_experiment(conf: Config, exp: ExperimentConfig) -> None:
     """
@@ -38,16 +48,20 @@ def run_experiment(conf: Config, exp: ExperimentConfig) -> None:
     print(f"Esperimento serventi: c in {exp.server_counts}. Per ogni c: transitorio "
           f"({len(conf.seeds)} seed) + batch means ({conf.num_batches} batch, seed {conf.seed}).")
 
-    # results[metric][c] = (mean, ci_half)
+    # results[metric][c] = (mean, ci_half); dati per le immagini composite tra c
     results: Dict[str, Dict[int, tuple]] = {k: {} for k in METRIC_KEYS}
+    transient_data: Dict[int, dict] = {}   # c -> {metrica: curves}
+    batch_data: Dict[int, dict] = {}       # c -> {metrica: (label, batch_values, mean, half)}
     for c in exp.server_counts:
         print(f"\n########## SIMULAZIONE c = {c} ##########")
         conf.c = c
         conf.trace_dir = os.path.join(exp.output_dir, f"c{c}")
         # 1. Transitorio (repliche indipendenti) -> 3 grafici nella cartella di c
-        transient.run_transient(conf)
+        transient_data[c] = transient.run_transient(conf)
         # 2. Steady-state (batch means)
         bundle = batchmeans.run_batch_means(conf, quiet=True)
+        batch_data[c] = {key: (label, b, mean, half)
+                         for key, label, b, mean, half in bundle["batches_plot"]}
         for k in METRIC_KEYS:
             _, mean, half = bundle["estimates"][k]
             results[k][c] = (mean, half)
@@ -57,6 +71,7 @@ def run_experiment(conf: Config, exp: ExperimentConfig) -> None:
     _print_table(exp, results)
     _save_csv(exp, results)
     _save_plots(exp, results)
+    _save_grid_plots(exp, transient_data, batch_data)
 
 
 def _print_table(exp: ExperimentConfig, results: Dict[str, Dict[int, tuple]]) -> None:
@@ -92,6 +107,24 @@ def _save_plots(exp: ExperimentConfig, results: Dict[str, Dict[int, tuple]]) -> 
             key, f"{label} vs numero di serventi", ylabel,
             exp.server_counts, means, cis, exp.output_dir)
         print(f"  grafico -> {path}")
+
+
+def _save_grid_plots(exp: ExperimentConfig, transient_data: Dict[int, dict],
+                     batch_data: Dict[int, dict]) -> None:
+    """Immagini composite: 4 riquadri (uno per c) dello stesso tipo di grafico."""
+    cs = exp.server_counts
+    # Transitorio: un'immagine composita per tipo (utilizzazione, servizio passed, risposta)
+    for key, title, xlabel, ylabel in TRANSIENT_GRID:
+        panels = [(c, transient_data[c][key]) for c in cs]
+        path = plots.plot_transient_grid(key, title, xlabel, ylabel, panels, exp.output_dir)
+        print(f"  griglia transitorio -> {path}")
+    # Batch means: un'immagine composita per metrica (diagramma diagnostico)
+    for key, label, ylabel in METRICS:
+        panels = [(c, batch_data[c][key][1], batch_data[c][key][2], batch_data[c][key][3])
+                  for c in cs]
+        path = plots.plot_batch_means_grid(key, f"Batch means - {label}", ylabel,
+                                           panels, exp.output_dir)
+        print(f"  griglia batch means -> {path}")
 
 
 def main() -> None:

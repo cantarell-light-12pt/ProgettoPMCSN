@@ -18,6 +18,7 @@ import numpy as np
 from config.settings import Config
 from runner import simulate_once, write_traces, _write_csv
 from stats.estimate import mean_ci
+from analysis import plots
 
 
 def _batch_means(values, times, warmup: float, T: float, k: int) -> np.ndarray:
@@ -71,6 +72,7 @@ def run_batch_means(conf: Config, quiet: bool = False) -> Dict[str, list]:
 
     rows = []
     estimates: Dict[str, tuple] = {}   # key -> (label, mean, half)
+    batches_plot = []                  # (key, label, valori_batch, mean, half) per i pannelli
     if not quiet:
         print(f"  ({k} batch dopo warmup {warmup:.0f}s) - media +/- IC 95% (t di Student)")
         print(f"  {'Metrica':<34}{'#batch':>7}{'Media':>14}{'+/- IC':>13}{'IC rel':>9}")
@@ -78,6 +80,10 @@ def run_batch_means(conf: Config, quiet: bool = False) -> Dict[str, list]:
         mean, half = mean_ci(list(b))
         rel = half / abs(mean) if mean else float("inf")
         estimates[key] = (label, mean, half)
+        batches_plot.append((key, label, b, mean, half))
+        # Diagramma diagnostico dei batch (valori dei batch + media + banda IC).
+        plots.plot_batch_means(key, f"Batch means - {label}", label, b, mean, half,
+                               conf.trace_dir)
         if not quiet:
             print(f"  {label:<34}{len(b):>7}{mean:>14.4f}{half:>13.4f}{rel:>8.2%}")
         rows.append([key, len(b), f"{mean:.6f}", f"{half:.6f}", f"{rel:.4f}"])
@@ -85,7 +91,7 @@ def run_batch_means(conf: Config, quiet: bool = False) -> Dict[str, list]:
     path = os.path.join(conf.trace_dir, "batch_means_summary.csv")
     _write_csv(path, ["metric", "n_batches", "mean", "ci_half_width_95", "ci_rel"], rows)
     if not quiet:
-        print(f"  Tabella salvata in {path}")
+        print(f"  Tabella + 6 diagrammi diagnostici (batchmeans_*.png) salvati in {conf.trace_dir}")
 
     return {
         "state_traces": [sim.state_trace],
@@ -94,4 +100,5 @@ def run_batch_means(conf: Config, quiet: bool = False) -> Dict[str, list]:
         "batch_traces": [sim.batch_trace],
         "welford_results": [sim.results()],
         "estimates": estimates,
+        "batches_plot": batches_plot,
     }
