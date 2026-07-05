@@ -1,0 +1,56 @@
+{
+    "simulation": {
+        "max_time": 10000000.0,
+        "seed": 42
+    },
+    "architecture": {
+        "c": 5
+    },
+    "traffic": {
+        "lambda_ext": 0.000046,
+        "pmf_batch": {
+            "values": [1, 2, 3, 4, 6, 7, 8, 9, 10],
+            "probs": [0.0426, 0.0189, 0.0457, 0.0755, 0.1058, 0.0781, 0.3468, 0.1962, 0.0904]
+        }
+    },
+    "routing": {
+        "p_passed": 0.773436,
+        "p_failed": 0.034525,
+        "p_errored": 0.180305,
+        "p_canceled": 0.011734
+    },
+    "service_setup": {
+        "pmf_setup": {
+            "values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 9.0, 11.0, 12.0, 13.0, 15.0, 19.0, 14.0, 16.0, 18.0, 17.0, 23.0, 21.0, 20.0, 76.0, 46.0, 28.0, 34.0, 94.0, 67.0],
+            "probs": [0.491119, 0.266563, 0.115454, 0.091534, 0.012641, 0.00739, 0.003436, 0.002204, 0.00201, 0.00201, 0.001167, 0.000648, 0.000648, 0.000583, 0.000519, 0.000324, 0.000324, 0.000259, 0.000259, 0.000194, 0.000194, 0.00013, 0.000065, 0.000065, 0.000065, 0.000065, 0.000065, 0.000065]
+        }
+    },
+    "service_test": {
+        "mu_test": 5.9545,
+        "sigma_test": 0.5316
+    },
+    "human_feedback": {
+        "mu_delay": 0.9591,
+        "sigma_delay": 2.1399,
+        "p_retry_failed": 0.3327,
+        "p_retry_errored": 0.8637
+    },
+    "output": {
+        "trace_dir": "output",
+        "sampling_interval": 5000.0
+    },
+    "analysis": {
+        "welch_window": 10,
+        "min_replications": 40,
+        "max_replications": 500,
+        "target_metric": "response_time",
+        "target_rel_halfwidth": 0.01
+    },
+    "validation": {
+        "dataset_path": "dataset_sonarjava.csv",
+        "target_project": "SonarSource/sonar-java"
+    },
+    "verification": {
+        "little_tol": 0.05
+    }
+}

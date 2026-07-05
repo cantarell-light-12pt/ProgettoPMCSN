@@ -1,0 +1,4 @@
+{
+    "server_counts": [1, 2, 5, 10],
+    "output_dir": "output/experiments"
+}
