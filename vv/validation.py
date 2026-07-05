@@ -58,18 +58,26 @@ def load_real_reference(config) -> dict:
     total = int(oc["len"].sum())
     real_outcome = {row["tr_status"]: row["len"] / total for row in oc.iter_rows(named=True)}
 
-    # Tempo di servizio reale = tr_log_buildduration, che gia' include setup + test
-    # (confermato). Sommare anche il setup lo conterebbe DUE volte. Si confronta con il
-    # service_visit simulato (setup + test del modello).
+    # Tempo di servizio reale = tr_log_buildduration (gia' setup + test). Confronto PER
+    # ESITO: il modello tratta ogni esito diversamente (troncamento con p_cut per i
+    # non-passed), quindi ha senso confrontarli separatamente. Si usano solo i job con
+    # buildduration REGISTRATA (drop null), riportando anche la copertura n.
     sdf = df.select([
         pl.col("tr_log_buildduration").cast(pl.Float64, strict=False).alias("build"),
         pl.col("tr_status"),
     ]).collect()
-    build = sdf["build"]
-    service_all = build.fill_null(0.0).to_numpy()
-    service_all = service_all[~np.isnan(service_all)]
-    mask_passed = (sdf["tr_status"] == "passed") & build.is_not_null()
-    service_passed = build.filter(mask_passed).to_numpy()
+    service_by_outcome = {}
+    for st in OUTCOMES:
+        col = sdf.filter(pl.col("tr_status") == st)["build"]
+        if st == "errored":
+            # Errored bimodale: i job SENZA buildduration hanno errato PRESTO (prima del
+            # build) -> servizio ~ 0 s; gli altri hanno girato il build. Si includono tutti
+            # (missing -> 0), coerente col modello a due modi.
+            service_by_outcome[st] = col.fill_null(0.0).to_numpy()
+        else:
+            # Per gli altri esiti il 'missing' significa "ha girato ma non registrato" -> escluso.
+            service_by_outcome[st] = col.drop_nulls().to_numpy()
+    service_passed = service_by_outcome["passed"]
 
     # Batch: job per build
     batch = df.group_by("tr_build_id").len(name="n").collect()["n"].to_numpy()
@@ -89,7 +97,7 @@ def load_real_reference(config) -> dict:
     return {
         "outcome": real_outcome,
         "feedback_prob": real_outcome.get("failed", 0.0) + real_outcome.get("errored", 0.0),
-        "service_all": service_all,
+        "service_by_outcome": service_by_outcome,
         "service_passed": service_passed,
         "batch_pmf": real_batch_pmf,
         "arrival_rate": real_arrival_rate,
@@ -111,8 +119,10 @@ def sim_reference(node_traces: Sequence[Sequence[tuple]],
     n = len(nt)
     fate_counts = Counter(r[1] for r in nt)
     sim_outcome = {k: fate_counts.get(k, 0) / n for k in OUTCOMES}
-    service_all = np.array([r[3] for r in nt], dtype=float)
-    service_passed = np.array([r[3] for r in nt if r[1] == "passed"], dtype=float)
+    service_by_outcome = {
+        st: np.array([r[3] for r in nt if r[1] == st], dtype=float) for st in OUTCOMES
+    }
+    service_passed = service_by_outcome["passed"]
 
     # Probabilita' di feedback realizzata: frazione di completamenti instradati
     # alla revisione umana (fate in {failed, errored}).
@@ -126,7 +136,7 @@ def sim_reference(node_traces: Sequence[Sequence[tuple]],
     sim_arrival_rate = len(batch_sizes) / (n_reps * max_time) if n_reps else float("nan")
 
     return {"outcome": sim_outcome, "feedback_prob": feedback_prob,
-            "service_all": service_all, "service_passed": service_passed,
+            "service_by_outcome": service_by_outcome, "service_passed": service_passed,
             "batch_pmf": sim_batch_pmf, "arrival_rate": sim_arrival_rate,
             "n": n, "n_arrivals": int(len(batch_sizes))}
 
@@ -139,18 +149,23 @@ def _ecdf(x: np.ndarray):
     return xs, ys
 
 
-def _dist_row(label: str, real: np.ndarray, sim: np.ndarray) -> list:
-    return [label,
-            f"{np.mean(real):.2f}", f"{np.mean(sim):.2f}",
-            f"{np.median(real):.2f}", f"{np.median(sim):.2f}",
-            f"{np.quantile(real, 0.9):.2f}", f"{np.quantile(sim, 0.9):.2f}"]
+def _svc_stats(arr: np.ndarray):
+    """(n, media, mediana, q90) di un array, robusto all'array vuoto."""
+    if arr is None or len(arr) == 0:
+        return 0, float("nan"), float("nan"), float("nan")
+    return len(arr), float(np.mean(arr)), float(np.median(arr)), float(np.quantile(arr, 0.9))
 
 
-def run(config, node_traces, batch_traces) -> None:
+def run(config, bundle) -> None:
     """
     Esegue la validazione completa e produce tabelle e grafici. Tutti i valori
-    'sim' sono misurati dalle tracce (node_trace, batch_trace), non dai parametri.
+    'sim' sono misurati dalle tracce, non dai parametri. bundle e' il dizionario
+    prodotto dalla run steady-state (analysis.batchmeans.run_batch_means): tracce
+    come liste a 1 elemento + welford_results.
     """
+    node_traces = bundle["node_traces"]
+    batch_traces = bundle["batch_traces"]
+
     print("\n=== VALIDAZIONE (dati misurati dal simulatore vs dataset reale) ===")
     print(f"  Progetto target: {config.target_project}")
 
@@ -172,14 +187,21 @@ def run(config, node_traces, batch_traces) -> None:
     print(f"  reale = {rf:.4f}   sim (misurata) = {sf:.4f}   |diff| = {abs(rf - sf):.4f}")
     rows_csv.append(["feedback_prob", "failed+errored", f"{rf:.4f}", f"{sf:.4f}", f"{abs(rf - sf):.4f}"])
 
-    # --- 3. Tempo di servizio --- #
-    print("\n[3] Tempo di servizio [s]  (media / mediana / q90)")
-    print(f"  {'insieme':<12}{'media R':>10}{'media S':>10}{'med R':>10}{'med S':>10}{'q90 R':>10}{'q90 S':>10}")
-    for label, rk, sk in [("complessivo", "service_all", "service_all"),
-                          ("passed", "service_passed", "service_passed")]:
-        row = _dist_row(label, real[rk], sim[sk])
-        print(f"  {row[0]:<12}{row[1]:>10}{row[2]:>10}{row[3]:>10}{row[4]:>10}{row[5]:>10}{row[6]:>10}")
-        rows_csv.append(["service_" + label] + row[1:])
+    # --- 3. Tempo di servizio PER ESITO --- #
+    # Il modello tratta ogni esito diversamente (passed = setup+test pieno; gli altri
+    # troncati con p_cut). Il reale usa la buildduration REGISTRATA (n = job con durata):
+    # per errored/canceled la copertura e' bassa (il resto non ha durata registrata),
+    # e il troncamento del modello non e' calibrato -> scostamenti attesi.
+    print("\n[3] Tempo di servizio per esito [s]  (reale = buildduration; errored bimodale: mancanti = errore precoce ~0)")
+    print(f"  {'esito':<10}{'n_R':>7}{'media_R':>9}{'med_R':>8}{'q90_R':>8}"
+          f"{'|':>3}{'n_S':>8}{'media_S':>9}{'med_S':>8}{'q90_S':>8}")
+    for st in OUTCOMES:
+        nr, mr, dr, qr = _svc_stats(real["service_by_outcome"].get(st))
+        ns, ms, ds, qs = _svc_stats(sim["service_by_outcome"].get(st))
+        print(f"  {st:<10}{nr:>7}{mr:>9.1f}{dr:>8.1f}{qr:>8.1f}{'|':>3}"
+              f"{ns:>8}{ms:>9.1f}{ds:>8.1f}{qs:>8.1f}")
+        rows_csv.append(["service_" + st, f"n_R={nr};n_S={ns}",
+                         f"{mr:.2f}", f"{ms:.2f}", f"{abs(mr - ms):.2f}"])
 
     # --- 4. Batch: PMF realizzata vs reale --- #
     print("\n[4] Dimensione batch (PMF misurata dai batch realizzati)")
@@ -222,16 +244,22 @@ def _save_plots(config, real: dict, sim: dict) -> None:
     fig.savefig(os.path.join(config.trace_dir, "validation_outcomes.png"), dpi=120)
     plt.close(fig)
 
-    # ECDF tempo di servizio (passed)
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for arr, name, col in [(real["service_passed"], "Reale (passed)", "tab:blue"),
-                           (sim["service_passed"], "Simulato (passed)", "tab:orange")]:
-        if len(arr):
-            xs, ys = _ecdf(arr)
-            ax.plot(xs, ys, label=name, color=col, linewidth=1.8)
-    ax.set_xlabel("Tempo di servizio [s]"); ax.set_ylabel("ECDF")
-    ax.set_title("Validazione - Tempo di servizio (passed)")
-    ax.legend(); fig.tight_layout()
+    # ECDF tempo di servizio PER ESITO (griglia 2x2): reale (buildduration) vs sim
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    for ax, st in zip(axes.ravel(), OUTCOMES):
+        r_arr = real["service_by_outcome"].get(st, np.array([]))
+        s_arr = sim["service_by_outcome"].get(st, np.array([]))
+        for arr, name, col in [(r_arr, f"Reale (n={len(r_arr)})", "tab:blue"),
+                               (s_arr, f"Simulato (n={len(s_arr)})", "tab:orange")]:
+            if len(arr):
+                xs, ys = _ecdf(arr)
+                ax.plot(xs, ys, label=name, color=col, linewidth=1.8)
+        ax.set_title(f"Esito: {st}")
+        ax.set_xlabel("Tempo di servizio [s]"); ax.set_ylabel("ECDF")
+        ax.legend(loc="lower right", fontsize=9)
+    fig.suptitle("Validazione - Tempo di servizio per esito (reale vs simulato)",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
     fig.savefig(os.path.join(config.trace_dir, "validation_service_ecdf.png"), dpi=120)
     plt.close(fig)
 

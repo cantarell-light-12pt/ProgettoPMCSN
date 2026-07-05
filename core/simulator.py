@@ -30,6 +30,9 @@ STREAM_TEST: int = 4      # tempo di test (Lognormal)
 STREAM_PCUT: int = 5      # troncamento anticipato p_cut (Uniform)
 STREAM_DELAY: int = 6     # delay di feedback umano (Lognormal)
 STREAM_RETRY: int = 7     # decisione di retry (Bernoulli)
+STREAM_ERR_MODE: int = 8  # modo di errore: precoce (setup) vs tardivo (build) (Bernoulli)
+STREAM_FAIL_SVC: int = 9  # servizio dei job failed (Lognormal calibrata)
+STREAM_CANC_SVC: int = 10 # servizio dei job canceled (Lognormal calibrata)
 
 
 class TravisCISimulator:
@@ -95,8 +98,7 @@ class TravisCISimulator:
         Registra i campioni di stato sulla griglia temporale fissa che cadono in
         (next_sample_time, up_to]. Lo stato del sistema e' costante tra due eventi
         consecutivi, quindi ogni campione riflette lo stato corrente pre-evento.
-        La griglia deterministica e' identica in tutte le repliche: cio' rende
-        immediato l'ensemble average del metodo di Welch.
+        Questi campioni alimentano la media cumulata del transitorio e i batch means.
         """
         while self.next_sample_time <= up_to:
             utilization = self.servers_busy / self.config.c
@@ -146,13 +148,23 @@ class TravisCISimulator:
         p_cut = rvgs.Uniform(0.0, 1.0)
 
         if fate == "errored":
-            return p_cut * t_setup, fate
+            # Errored bimodale: con prob p_errored_early rompe PRESTO (durante il setup,
+            # servizio corto); altrimenti ha girato l'intero build e poi e' andato in
+            # errore (servizio ~ come un passed). Riproduce la coda lunga reale.
+            rngs.SelectStream(STREAM_ERR_MODE)
+            if rvgs.Bernoulli(self.config.p_errored_early) == 1:
+                return p_cut * t_setup, fate
+            return t_setup + t_test, fate
         elif fate == "passed":
             return t_setup + t_test, fate
         elif fate == "failed":
-            return t_setup + (p_cut * t_test), fate
-        else:
-            return p_cut * (t_setup + t_test), fate
+            # Servizio calibrato sulle buildduration reali dei failed (girano quasi tutto
+            # il build, non meta' come col troncamento p_cut).
+            rngs.SelectStream(STREAM_FAIL_SVC)
+            return t_setup + rvgs.Lognormal(self.config.mu_failed, self.config.sigma_failed), fate
+        else:  # canceled
+            rngs.SelectStream(STREAM_CANC_SVC)
+            return t_setup + rvgs.Lognormal(self.config.mu_canceled, self.config.sigma_canceled), fate
 
     def _try_start_service(self) -> None:
         """

@@ -24,8 +24,10 @@ class Config:
         with open(filepath, 'r') as f:
             data = json.load(f)
 
-        self.max_time: float = data["simulation"]["max_time"]
         self.seed: int = data["simulation"]["seed"]
+        # max_time e' impostato dal driver prima di ogni run (= finite_horizon per il
+        # transitorio, = run_length per la run batch means). Default: run_length.
+        self.max_time: float = 0.0
 
         self.c: int = data["architecture"]["c"]
         self.lambda_ext: float = data["traffic"]["lambda_ext"]
@@ -37,34 +39,49 @@ class Config:
         self.p_failed: float = data["routing"]["p_failed"]
         self.p_errored: float = data["routing"]["p_errored"]
         self.p_canceled: float = data["routing"]["p_canceled"]
+        # Errored bimodale: prob. di errore PRECOCE (rottura nel setup) vs tardivo (build completo).
+        self.p_errored_early: float = data["routing"]["p_errored_early"]
 
         # Validazione strutturale dei Rischi Competitivi
         total_p = self.p_passed + self.p_failed + self.p_errored + self.p_canceled
         if abs(total_p - 1.0) > 1e-6:
             raise ValueError(f"Constraint Violato: Le probabilità di routing sommano a {total_p}, devono sommare a 1.0")
+        if not (0.0 <= self.p_errored_early <= 1.0):
+            raise ValueError(
+                f"Constraint Violato: 'routing.p_errored_early' deve essere in [0,1], trovato {self.p_errored_early}"
+            )
 
         self.pmf_setup_values: List[float] = data["service_setup"]["pmf_setup"]["values"]
         self.pmf_setup_probs: List[float] = data["service_setup"]["pmf_setup"]["probs"]
 
         self.mu_test: float = data["service_test"]["mu_test"]
         self.sigma_test: float = data["service_test"]["sigma_test"]
+        # Servizio di failed/canceled: lognormale calibrata sulle rispettive buildduration
+        # reali (netto setup), invece del troncamento uniforme p_cut (che sottostimava).
+        self.mu_failed: float = data["service_failed"]["mu"]
+        self.sigma_failed: float = data["service_failed"]["sigma"]
+        self.mu_canceled: float = data["service_canceled"]["mu"]
+        self.sigma_canceled: float = data["service_canceled"]["sigma"]
+        if self.sigma_failed <= 0 or self.sigma_canceled <= 0:
+            raise ValueError("Constraint Violato: 'sigma' di service_failed/service_canceled deve essere > 0")
 
         self.mu_delay: float = data["human_feedback"]["mu_delay"]
         self.sigma_delay: float = data["human_feedback"]["sigma_delay"]
         self.p_retry_failed: float = data["human_feedback"]["p_retry_failed"]
         self.p_retry_errored: float = data["human_feedback"]["p_retry_errored"]
 
-        # Parametri operativi (non del modello): output tracce e analisi transitorio.
+        # Parametri operativi (non del modello): output tracce.
         self.trace_dir: str = data["output"]["trace_dir"]
         self.sampling_interval: float = data["output"]["sampling_interval"]
-        self.welch_window: int = data["analysis"]["welch_window"]
 
-        # Numero di repliche ADATTIVO: si aggiungono repliche finche' la semi-ampiezza
-        # relativa dell'IC della metrica-obiettivo scende sotto la soglia, entro [min, max].
-        self.min_replications: int = data["analysis"]["min_replications"]
-        self.max_replications: int = data["analysis"]["max_replications"]
-        self.target_metric: str = data["analysis"]["target_metric"]
-        self.target_rel_halfwidth: float = data["analysis"]["target_rel_halfwidth"]
+        # Transitorio con repliche indipendenti (orizzonte finito).
+        self.finite_horizon: float = data["transient"]["finite_horizon"]
+        self.seeds: List[int] = data["transient"]["seeds"]
+
+        # Steady-state con batch means (orizzonte "infinito", single long run).
+        self.run_length: float = data["batch_means"]["run_length"]
+        self.num_batches: int = data["batch_means"]["num_batches"]
+        self.warmup: float = data["batch_means"]["warmup"]
 
         # Validazione dei parametri operativi
         if not self.trace_dir:
@@ -73,27 +90,23 @@ class Config:
             raise ValueError(
                 f"Constraint Violato: 'output.sampling_interval' deve essere > 0, trovato {self.sampling_interval}"
             )
-        if self.welch_window < 0:
+        if self.finite_horizon <= 0:
             raise ValueError(
-                f"Constraint Violato: 'analysis.welch_window' deve essere >= 0, trovato {self.welch_window}"
+                f"Constraint Violato: 'transient.finite_horizon' deve essere > 0, trovato {self.finite_horizon}"
             )
-        valid_metrics = {"utilization", "service_time", "wait_time",
-                         "response_time", "qlen", "syslen"}
-        if self.min_replications < 2:
+        if not self.seeds:
+            raise ValueError("Constraint Violato: 'transient.seeds' non puo' essere vuoto")
+        if self.run_length <= 0:
             raise ValueError(
-                f"Constraint Violato: 'analysis.min_replications' deve essere >= 2 (serve per l'IC), trovato {self.min_replications}"
+                f"Constraint Violato: 'batch_means.run_length' deve essere > 0, trovato {self.run_length}"
             )
-        if self.max_replications < self.min_replications:
+        if self.num_batches < 2:
             raise ValueError(
-                f"Constraint Violato: 'analysis.max_replications' ({self.max_replications}) deve essere >= min_replications ({self.min_replications})"
+                f"Constraint Violato: 'batch_means.num_batches' deve essere >= 2 (serve per l'IC), trovato {self.num_batches}"
             )
-        if self.target_metric not in valid_metrics:
+        if not (0.0 <= self.warmup < self.run_length):
             raise ValueError(
-                f"Constraint Violato: 'analysis.target_metric' deve essere uno di {sorted(valid_metrics)}, trovato '{self.target_metric}'"
-            )
-        if self.target_rel_halfwidth <= 0:
-            raise ValueError(
-                f"Constraint Violato: 'analysis.target_rel_halfwidth' deve essere > 0, trovato {self.target_rel_halfwidth}"
+                f"Constraint Violato: 'batch_means.warmup' deve essere in [0, run_length), trovato {self.warmup}"
             )
 
         # Parametri operativi di Verifica e Validazione.
