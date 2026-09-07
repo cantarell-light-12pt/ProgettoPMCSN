@@ -17,7 +17,8 @@ Quantita' confrontate (reale vs simulato-misurato):
   4. Dimensione batch: PMF empirica dei batch realizzati (batch_trace) vs PMF
      empirica reale (job per build).
   5. Tasso di arrivo dei build: arrivi realizzati / tempo simulato (batch_trace)
-     vs stima dai timestamp reali.
+     vs stima dai timestamp reali delle sole build ESOGENE (stessa popolazione
+     della calibrazione, cfr. analysis.dataset_fit.arrivi_esogeni).
 
 Output: tabelle a stdout + CSV e grafici PNG nella cartella di output.
 """
@@ -32,6 +33,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+from analysis.dataset_fit import arrivi_esogeni, carica_job
 
 sns.set_theme(style="whitegrid")
 
@@ -85,14 +88,19 @@ def load_real_reference(config) -> dict:
     real_batch_pmf = {int(v): c / len(batch) for v, c in zip(vals, counts)}
 
     # Tasso d'arrivo degli arrivi NUOVI: il simulatore genera solo arrivi esogeni
-    # (non i ritorni dal feedback), quindi il riferimento reale conta i soli build
-    # nuovi (push, non-PR) - la stessa base su cui e' calibrato lambda_ext.
-    b = (df.filter(pl.col("gh_is_pr") == False)
-         .select(["tr_build_id", "gh_build_started_at"])
-         .unique(subset="tr_build_id").drop_nulls().collect())
-    ts = b["gh_build_started_at"].str.to_datetime(strict=False).drop_nulls().sort()
-    span = (ts.max() - ts.min()).total_seconds()
-    real_arrival_rate = len(ts) / span if span > 0 else float("nan")
+    # (non i ritorni dal feedback), quindi il riferimento reale deve contare le sole
+    # build esogene con lo STESSO criterio della calibrazione (prima build del commit,
+    # oppure build precedente "buona") - da cui il riuso di arrivi_esogeni. Il filtro
+    # non-PR usato in precedenza selezionava una popolazione diversa e non annidata
+    # (1926 build contro 1903, 553 di differenza simmetrica): la vicinanza dei due
+    # totali era una coincidenza, non una conferma.
+    # Lo stimatore e' n/span, l'analogo esatto della misura lato simulatore (arrivi
+    # generati / orizzonte simulato). La calibrazione usa invece 1/media(gap>0), MLE
+    # esponenziale che scarta i gap nulli: i due valori distano lo 0,8% e arrotondano
+    # entrambi al lambda_ext adottato in config.json.
+    ts_eso, _ = arrivi_esogeni(carica_job(config))
+    span = float(ts_eso.max() - ts_eso.min())
+    real_arrival_rate = len(ts_eso) / span if span > 0 else float("nan")
 
     return {
         "outcome": real_outcome,
@@ -213,7 +221,7 @@ def run(config, bundle) -> None:
         rows_csv.append(["batch", str(k), f"{rf:.4f}", f"{sf:.4f}", f"{abs(rf - sf):.4f}"])
 
     # --- 5. Tasso d'arrivo: realizzato vs reale (soli arrivi nuovi) --- #
-    print("\n[5] Tasso di arrivo dei build NUOVI [build/s]  (reale = push/non-PR)")
+    print("\n[5] Tasso di arrivo dei build NUOVI [build/s]  (reale = build esogene)")
     rr, sr = real["arrival_rate"], sim["arrival_rate"]
     rel = abs(sr - rr) / rr if rr else float("nan")
     print(f"  reale = {rr:.3e}   sim (misurato, {sim['n_arrivals']} arrivi) = {sr:.3e}   err.rel. = {rel:.1%}")
